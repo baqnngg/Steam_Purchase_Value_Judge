@@ -135,45 +135,20 @@ class SteamReviewFetcher:
 
 
 # ─────────────────────────────────────────────────────────
-# GenreBonus — 장르 인기도 가산점
+# GenreBonus — 장르 인기도 점수 산출
 # ─────────────────────────────────────────────────────────
 class GenreBonus:
-    """
-    Steam 장르 인기도 기반 가산점 (최대 +10점)
-    
-    S티어 (+10): 현재 Steam에서 가장 인기 있는 장르
-    A티어 (+7) : 꾸준히 높은 수요를 가진 장르
-    B티어 (+4) : 중간 수준 인기 장르
-    C티어 (+1) : 비교적 낮은 수요 장르
-    미분류(+0) : 위 티어에 해당 없음
-    """
-
-    TIER_S = {
-        'action', 'rpg', 'adventure', 'strategy', 'indie'
-    }
-    TIER_A = {
-        'simulation', 'sports', 'casual', 'racing', 'massively multiplayer'
-    }
-    TIER_B = {
-        'early access', 'free to play', 'puzzle', 'platformer', 'shooter'
-    }
+    TIER_S = {'action', 'rpg', 'adventure', 'strategy', 'indie'}
+    TIER_A = {'simulation', 'sports', 'casual', 'racing', 'massively multiplayer'}
+    TIER_B = {'early access', 'free to play', 'puzzle', 'platformer', 'shooter'}
     TIER_C = {
         'education', 'animation & modeling', 'utilities', 'video production',
         'audio production', 'photo editing', 'software training', 'accounting'
     }
 
-    TIER_BONUS = {
-        'S': 10,
-        'A': 7,
-        'B': 4,
-        'C': 1,
-    }
+    TIER_BONUS = {'S': 10, 'A': 7, 'B': 4, 'C': 1}
 
     def calculate(self, genres_str: str):
-        """
-        게임의 장르 문자열을 받아 최고 티어 가산점을 반환.
-        여러 장르가 있을 경우 가장 높은 티어 점수 적용.
-        """
         if not genres_str or genres_str.lower() in ('', 'unknown', 'nan'):
             return 0.0, '미분류', None
 
@@ -210,39 +185,56 @@ class GenreBonus:
 # ScoreResult
 # ─────────────────────────────────────────────────────────
 class ScoreResult:
-    def __init__(self, review, value, popularity, genre_bonus, genre_tier, genre_matched):
-        self.review        = review        # 0~40
-        self.value         = value         # 0~35
-        self.popularity    = popularity    # 0~25
-        self.genre_bonus   = genre_bonus   # 0~10 (가산점)
+    def __init__(self, review, value, popularity, genre, genre_tier, genre_matched):
+        self.review        = review        # 0 ~ 40
+        self.value         = value         # 0 ~ 30
+        self.popularity    = popularity    # 0 ~ 20
+        self.genre         = genre         # 0 ~ 10
         self.genre_tier    = genre_tier    # 'S'/'A'/'B'/'C'/'미분류'
-        self.genre_matched = genre_matched # 가산점 기준이 된 장르명
-
-    def base_total(self):
-        """기본 점수 합계 (100점 만점)"""
-        return self.review + self.value + self.popularity
+        self.genre_matched = genre_matched # 점수 기준이 된 장르명
 
     def total(self):
-        """장르 가산점 포함 최종 점수 (최대 110점)"""
-        return self.base_total() + self.genre_bonus
+        return self.review + self.value + self.popularity + self.genre
 
 
 # ─────────────────────────────────────────────────────────
-# Scorer
+# Scorer (가성비 모델 반영 버전)
 # ─────────────────────────────────────────────────────────
 class Scorer:
-    def __init__(self):
-        # 기본 배점: 리뷰 40 + 가성비 35 + 인기도 25 = 100
-        self.weights = {'review': 40, 'value': 35, 'popularity': 25}
-        self.genre_bonus_calc = GenreBonus()
+    def __init__(self, df):
+        self.weights = {'review': 40, 'value': 30, 'popularity': 20, 'genre': 10}
+        self.genre_calc = GenreBonus()
+        self.genre_avg_prices = self._calculate_genre_avg_prices(df)
+
+    def _calculate_genre_avg_prices(self, df):
+        price_col = 'Required age' if 'Required age' in df.columns else 'Price'
+        temp_df = df[[price_col, 'Genres']].copy()
+        temp_df[price_col] = pd.to_numeric(temp_df[price_col], errors='coerce').fillna(0.0)
+        
+        temp_df['Genre_List'] = temp_df['Genres'].fillna('Unknown').str.split(',')
+        exploded = temp_df.explode('Genre_List')
+        exploded['Genre_List'] = exploded['Genre_List'].str.strip().str.lower()
+        
+        return exploded.groupby('Genre_List')[price_col].mean().to_dict()
+
+    def _get_game_genre_avg_price(self, genres_str):
+        if not genres_str or genres_str.lower() in ('', 'unknown', 'nan'):
+            return self.genre_avg_prices.get('unknown', 0.0)
+        
+        genres = [g.strip().lower() for g in genres_str.split(',')]
+        prices = [self.genre_avg_prices.get(g, 0.0) for g in genres if g in self.genre_avg_prices]
+        
+        if not prices:
+            return 0.0
+        return sum(prices) / len(prices)
 
     def score(self, game):
-        bonus, tier, matched = self.genre_bonus_calc.calculate(game.genres)
+        genre_score, tier, matched = self.genre_calc.calculate(game.genres)
         return ScoreResult(
             review        = self._review_score(game),
             value         = self._value_score(game),
             popularity    = self._popularity_score(game),
-            genre_bonus   = bonus,
+            genre         = genre_score,
             genre_tier    = tier,
             genre_matched = matched,
         )
@@ -256,13 +248,31 @@ class Scorer:
         vol_score = min(math.log1p(total) / math.log1p(VOL_REF), 1.0) * 0.5
         return round((ratio_score + vol_score) * self.weights["review"], 2)
 
+    # 💡 [핵심 수정] 3번 옵션: 가성비(만족도 반영) 모델 구현
     def _value_score(self, game):
-        if game.price == 0:
-            return self.weights['value'] if game.playtime_forever > 0 else 0.0
+        avg_price = self._get_game_genre_avg_price(game.genres)
+        
+        # 1. 만족도(긍정 리뷰 비율) 산출 (리뷰가 아예 없으면 기본 평점 50% 가정)
+        total_reviews = game.positive + game.negative
+        satisfaction_ratio = (game.positive / total_reviews) if total_reviews > 0 else 0.5
+        
+        # 2. 플레이 타임 가져오기 (시간 단위)
         hours = game.playtime_forever / 60
         if hours == 0:
             return 0.0
-        return round(min(hours / game.price / 10.0, 1.0) * self.weights['value'], 2)
+
+        # 3. 가성비 분자: 진짜 유저가 만족하며 보낸 '유효 플레이 타임'
+        effective_hours = hours * satisfaction_ratio
+        
+        # 4. 무료 게임 예외 처리 (만족도가 높고 플레이했다면 만점 제공)
+        if game.price == 0:
+            return round(satisfaction_ratio * self.weights['value'], 2)
+        
+        # 5. 가성비 분모: 장르 평균가 대비 이 게임의 상대적 가격 비율
+        price_ratio = game.price / avg_price if avg_price > 0 else 1.0
+        
+        # 6. 최종 가성비 계산 (유효 타임 기준선을 15시간으로 잡아 밸런싱)
+        return round(min((effective_hours / price_ratio) / 15.0, 1.0) * self.weights['value'], 2)
 
     def _popularity_score(self, game):
         ccu = min(math.log1p(game.peak_ccu) / math.log1p(100_000), 1.0)
@@ -291,7 +301,6 @@ class GameFinder:
 # Recommender
 # ─────────────────────────────────────────────────────────
 class Recommender:
-    # 장르 가산점 포함 기준 (최대 110점)
     def __init__(self):
         self.thresholds = {'buy': 72, 'wait': 42}
 
@@ -329,14 +338,11 @@ class ReportPrinter:
             if total_rev >= 10 else "리뷰 없음"
         )
 
-        # 장르 가산점 표시 문자열
         if result.genre_tier and result.genre_tier != '미분류':
             tier_label = self.TIER_LABEL.get(result.genre_tier, result.genre_tier)
-            genre_bonus_str = (
-                f"+{result.genre_bonus:.0f}점  [{tier_label}]  ({result.genre_matched})"
-            )
+            genre_score_str = f"{result.genre:.0f}점  [{tier_label}]  ({result.genre_matched})"
         else:
-            genre_bonus_str = f"+0점  [미분류]"
+            genre_score_str = f"0점  [미분류]"
 
         print()
         print("=" * 60)
@@ -350,12 +356,11 @@ class ReportPrinter:
         print(f"  리뷰        : {ratio_str}")
         print("-" * 60)
         print(f"  리뷰 점수    {self._bar(result.review,     40)}  {result.review:5.1f} / 40")
-        print(f"  가성비       {self._bar(result.value,      35)}  {result.value:5.1f} / 35")
-        print(f"  인기도       {self._bar(result.popularity, 25)}  {result.popularity:5.1f} / 25")
+        print(f"  가성비       {self._bar(result.value,      30)}  {result.value:5.1f} / 30")
+        print(f"  인기도       {self._bar(result.popularity, 20)}  {result.popularity:5.1f} / 20")
+        print(f"  장르 점수    {self._bar(result.genre,      10)}  {result.genre:5.1f} / 10")
         print("-" * 60)
-        print(f"  기본 점수    {self._bar(result.base_total(), 100)}  {result.base_total():5.1f} / 100")
-        print(f"  장르 가산점  {genre_bonus_str}")
-        print(f"  최종 점수    {self._bar(result.total(), 110)}  {result.total():5.1f} / 110")
+        print(f"  최종 점수    {self._bar(result.total(),   100)}  {result.total():5.1f} / 100")
         print("=" * 60)
         print(f"  판정: {verdict_msg}")
         print("=" * 60)
@@ -371,14 +376,14 @@ class ReportPrinter:
 # ─────────────────────────────────────────────────────────
 def main():
     print("\n  게임 살까 말까 판단기")
-    print("─" * 32)
+    print("─" * 36)
 
     print("데이터 로딩 중...", end=" ", flush=True)
     df = DataLoader(".\\games_cleaned.csv").load()
     print(f"완료 ({len(df):,}개 게임)\n")
 
     finder         = GameFinder(df)
-    scorer         = Scorer()
+    scorer         = Scorer(df)
     recommender    = Recommender()
     printer        = ReportPrinter()
     review_fetcher = SteamReviewFetcher()
