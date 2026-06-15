@@ -9,7 +9,7 @@ import pandas as pd
 # ─────────────────────────────────────────────
 # 1. 데이터 로드
 # ─────────────────────────────────────────────
-df = pd.read_csv('games.csv', low_memory=False)
+df = pd.read_csv('code/games.csv', low_memory=False)
 print(f"로드 완료: {len(df):,}행 * {len(df.columns)}열")
 
 # ─────────────────────────────────────────────
@@ -54,5 +54,5 @@ df['Release date'] = pd.to_datetime(df['Release date'], format='%b %d, %Y', erro
 remaining = df.isnull().sum().sum()
 print(f"정제 완료: {len(df):,}행 * {len(df.columns)}열 | 잔여 결측치: {remaining}개")
 
-df.to_csv('games_cleaned.csv', index=False)
-print("저장 완료: games_cleaned.csv")
+df.to_csv('code/games_cleaned.csv', index=False)
+print("저장 완료: code/games_cleaned.csv")

@@ -133,7 +133,7 @@ TARGET_GAMES = [
 
 def load_data():
     print("데이터 로딩 중...", end=" ", flush=True)
-    df = DataLoader("games.csv").load()
+    df = DataLoader("code/games_cleaned.csv").load()
     print(f"완료 ({len(df):,}개)")
     return df
 
